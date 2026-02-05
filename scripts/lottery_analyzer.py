@@ -1253,7 +1253,7 @@ class DoubleColorBallAnalyzer:
 
         return betting_plan
 
-    def generate_enhanced_plan_with_combos(self):
+    def generate_enhanced_plan_with_combos(self, recommendations=None, red_dan=None, blue_dan=None, silent=False):
         """
         基于8种智能策略推荐 + 历史规律分析，生成：
         - 8 注 6+1 单式（原有8种策略）
@@ -1262,9 +1262,11 @@ class DoubleColorBallAnalyzer:
         
         其中 7+1、6+2 复式基于“历史上出现情况最多”的策略特征构建。
         """
-        print("\n=== 生成增强版推荐方案：8种策略 + 2种复式 ===")
+        if not silent:
+            print("\n=== 生成增强版推荐方案：8种策略 + 2种复式 ===")
         if not self.lottery_data:
-            print("无数据，无法生成推荐方案")
+            if not silent:
+                print("无数据，无法生成推荐方案")
             return {}
 
         # 历史规律原始分布（奇偶 / 和值区间 / 跨度区间）
@@ -1273,10 +1275,12 @@ class DoubleColorBallAnalyzer:
         sum_dist = patterns_raw.get('sum_dist', {})
         span_dist = patterns_raw.get('span_dist', {})
 
-        # 先生成8种策略推荐（6+1 单式）
-        recommendations = self.generate_recommendations(num_sets=8)
+        # 先生成8种策略推荐（6+1 单式），或复用外部传入的结果
+        if recommendations is None:
+            recommendations = self.generate_recommendations(num_sets=8)
         if not recommendations:
-            print("8种策略推荐生成失败，无法构建增强方案。")
+            if not silent:
+                print("8种策略推荐生成失败，无法构建增强方案。")
             return {}
 
         # 分析每种策略在历史中的“支持度”：使用出现次数最多的奇偶/和值/跨度模式
@@ -1296,15 +1300,18 @@ class DoubleColorBallAnalyzer:
                 best_score = score
                 best_rec = rec
 
-        print("\n历史匹配度评分（越高表示该策略特征在历史中越常见）：")
-        for idx, rec in enumerate(recommendations, 1):
-            print(f"策略 {idx} [{rec['strategy']}]: 历史匹配得分 = {rec.get('history_score', 0)}")
+        if not silent:
+            print("\n历史匹配度评分（越高表示该策略特征在历史中越常见）：")
+            for idx, rec in enumerate(recommendations, 1):
+                print(f"策略 {idx} [{rec['strategy']}]: 历史匹配得分 = {rec.get('history_score', 0)}")
 
         if not best_rec:
-            print("未能根据历史数据识别出最优策略特征，跳过复式构建。")
+            if not silent:
+                print("未能根据历史数据识别出最优策略特征，跳过复式构建。")
             best_rec = recommendations[0]
 
-        print(f"\n📌 历史模式最匹配的策略: {best_rec['strategy']} (得分 {best_rec.get('history_score', 0)})")
+        if not silent:
+            print(f"\n📌 历史模式最匹配的策略: {best_rec['strategy']} (得分 {best_rec.get('history_score', 0)})")
 
         # ---------- 8 注 6+1 单式（直接使用8种策略结果） ----------
         singles_6_1 = []
@@ -1332,6 +1339,32 @@ class DoubleColorBallAnalyzer:
         # 以历史最匹配策略的红球为基础
         base_reds = sorted(best_rec["red_balls"])
         base_blue = best_rec["blue_ball"]
+
+        # 如果传入了红胆/蓝胆参数，则进行约束：确保这些号码被包含进基础组合
+        if red_dan:
+            red_dan_set = {int(x) for x in red_dan if 1 <= int(x) <= 33}
+            # 先把胆号全部加进去
+            for d in red_dan_set:
+                if d not in base_reds:
+                    base_reds.append(d)
+            base_reds = sorted(base_reds)
+            # 如果超过6个，则优先保留胆号，再根据历史频率剔除非胆号中频率最低的，直到只剩6个
+            if len(base_reds) > 6:
+                non_dan = [n for n in base_reds if n not in red_dan_set]
+                # 按历史频率升序排序，优先剔除低频的
+                non_dan_sorted = sorted(non_dan, key=lambda n: red_counter.get(n, 0))
+                while len(base_reds) > 6 and non_dan_sorted:
+                    to_remove = non_dan_sorted.pop(0)
+                    if to_remove in base_reds:
+                        base_reds.remove(to_remove)
+
+        if blue_dan:
+            # 取第一个合法的蓝胆作为基础蓝球
+            for b in blue_dan:
+                b_int = int(b)
+                if 1 <= b_int <= 16:
+                    base_blue = b_int
+                    break
 
         # ---------- 7+1 复式：在基础6个红球上扩展1个红球 ----------
         # 选择历史高频、且不在基础组合中的一个红球作为扩展
@@ -1394,23 +1427,24 @@ class DoubleColorBallAnalyzer:
         }
 
         # 控制台输出总览（两位数格式）
-        print("\n--- 8 注 6+1 单式（智能策略） ---")
-        for i, t in enumerate(singles_6_1, 1):
-            red_str = " ".join(f"{x:02d}" for x in t["red_balls"])
-            blue_str = " ".join(f"{x:02d}" for x in t["blue_balls"])
-            print(f"单式 {i}: {red_str} + {blue_str}  (策略: {t['strategy']})")
+        if not silent:
+            print("\n--- 8 注 6+1 单式（智能策略） ---")
+            for i, t in enumerate(singles_6_1, 1):
+                red_str = " ".join(f"{x:02d}" for x in t["red_balls"])
+                blue_str = " ".join(f"{x:02d}" for x in t["blue_balls"])
+                print(f"单式 {i}: {red_str} + {blue_str}  (策略: {t['strategy']})")
 
-        print("\n--- 1 注 7+1 复式（基于历史高匹配策略） ---")
-        red_str = " ".join(f"{x:02d}" for x in ticket_7_1["red_balls"])
-        blue_str = " ".join(f"{x:02d}" for x in ticket_7_1["blue_balls"])
-        print(f"7+1: {red_str} + {blue_str}  (来源策略: {ticket_7_1['source_strategy']})")
+            print("\n--- 1 注 7+1 复式（基于历史高匹配策略） ---")
+            red_str = " ".join(f"{x:02d}" for x in ticket_7_1["red_balls"])
+            blue_str = " ".join(f"{x:02d}" for x in ticket_7_1["blue_balls"])
+            print(f"7+1: {red_str} + {blue_str}  (来源策略: {ticket_7_1['source_strategy']})")
 
-        print("\n--- 1 注 6+2 复式（基于历史高匹配策略） ---")
-        red_str = " ".join(f"{x:02d}" for x in ticket_6_2["red_balls"])
-        blue_str = " ".join(f"{x:02d}" for x in ticket_6_2["blue_balls"])
-        print(f"6+2: {red_str} + {blue_str}  (来源策略: {ticket_6_2['source_strategy']})")
+            print("\n--- 1 注 6+2 复式（基于历史高匹配策略） ---")
+            red_str = " ".join(f"{x:02d}" for x in ticket_6_2["red_balls"])
+            blue_str = " ".join(f"{x:02d}" for x in ticket_6_2["blue_balls"])
+            print(f"6+2: {red_str} + {blue_str}  (来源策略: {ticket_6_2['source_strategy']})")
 
-        print("\n✅ 增强版推荐方案生成完成：8种策略单式 + 7+1 + 6+2。")
+            print("\n✅ 增强版推荐方案生成完成：8种策略单式 + 7+1 + 6+2。")
 
         return enhanced_plan
     
@@ -1561,6 +1595,8 @@ class DoubleColorBallAnalyzer:
         patterns_data = self._get_patterns_analysis()
         trends_data = self._get_trends_analysis()
         recommendations = self.generate_recommendations(num_sets=8)
+        # 基于8种策略和历史规律生成增强版方案（8注6+1 + 7+1 + 6+2），静默模式供报告使用
+        enhanced_plan = self.generate_enhanced_plan_with_combos(recommendations=recommendations, silent=True)
         
         # 生成报告内容 UTC+8时区
         current_time = (datetime.now() + timedelta(hours=8)).strftime('%Y年%m月%d日 %H:%M:%S')
@@ -1574,7 +1610,7 @@ class DoubleColorBallAnalyzer:
 - **数据来源**: 中国福利彩票官方API
 
 ## ⚠️ 重要免责声明
-**本分析报告仅供学习和研究使用，彩票开奖完全随机，历史数据无法预测未来结果。请理性购彩，量力而行！**
+**本分析报告仅供学习和研究使用，彩票开奖完全随机。请理性购彩，量力而行！**
 
 ---
 
@@ -1662,6 +1698,36 @@ class DoubleColorBallAnalyzer:
             report_content += f"**推荐组合 {i}** ({rec['strategy']}): {red_str} + **{rec['blue_ball']:02d}**\n"
             report_content += f"- 特征: {rec['odd_even']} | 和值:{rec['sum']} | 跨度:{rec['span']}\n"
             report_content += f"- 说明: {rec['description']}\n\n"
+
+        # 如果有增强版复式方案，则补充一节说明
+        if enhanced_plan:
+            report_content += """---
+
+## 🧩 结构化投注方案（8种策略 + 复式组合）
+
+> 以下组合仍然基于历史统计特征生成，仅用于学习与参考，不保证中奖。
+
+### 8 注 6+1 单式（策略机选）
+
+"""
+            singles = enhanced_plan.get("singles_6_1", [])
+            for i, t in enumerate(singles, 1):
+                red_str = " ".join(f"{x:02d}" for x in t["red_balls"])
+                blue_str = " ".join(f"{x:02d}" for x in t["blue_balls"])
+                report_content += f"- 单式 {i} ({t['strategy']}): {red_str} + **{blue_str}**\n"
+
+            combo_7_1 = enhanced_plan.get("combo_7_1")
+            combo_6_2 = enhanced_plan.get("combo_6_2")
+
+            if combo_7_1:
+                red_str = " ".join(f"{x:02d}" for x in combo_7_1["red_balls"])
+                blue_str = " ".join(f"{x:02d}" for x in combo_7_1["blue_balls"])
+                report_content += f"\n### 7+1 复式组合\n\n- 7+1 ({combo_7_1['source_strategy']}): {red_str} + **{blue_str}**\n"
+
+            if combo_6_2:
+                red_str = " ".join(f"{x:02d}" for x in combo_6_2["red_balls"])
+                blue_str = " ".join(f"{x:02d}" for x in combo_6_2["blue_balls"])
+                report_content += f"\n### 6+2 复式组合\n\n- 6+2 ({combo_6_2['source_strategy']}): {red_str} + **{blue_str}**\n"
         
         # 添加使用说明和提醒
         report_content += f"""---
@@ -1682,8 +1748,6 @@ class DoubleColorBallAnalyzer:
 ### 重要提醒
 
 > 🎲 **彩票本质**: 彩票开奖具有完全的随机性和偶然性
-> 
-> 📊 **数据局限**: 历史数据无法预测未来开奖结果
 > 
 > 🎯 **参考价值**: 本分析仅供统计学习和娱乐参考
 > 
@@ -2098,7 +2162,7 @@ class DoubleColorBallAnalyzer:
             # 构建推荐号码内容
             recommendations_content = f"""## 🎯 今日推荐号码
 
-**⚠️ 以下推荐号码基于历史统计分析，仅供参考，不保证中奖！**
+**⚠️ 以下推荐号码基于历史统计分析，仅供参考！**
 
 ### 双色球推荐 (更新时间: {current_time})
 
