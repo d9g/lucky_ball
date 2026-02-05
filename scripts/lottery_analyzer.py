@@ -383,6 +383,256 @@ class DoubleColorBallAnalyzer:
         except FileNotFoundError:
             print(f"文件 {filename} 不存在")
             return False
+        except json.JSONDecodeError:
+            print(f"文件 {filename} 内容解析失败")
+            return False
+
+    def fetch_lottery_data_incremental(self, start_date, end_date=None):
+        """
+        增量抓取双色球数据：
+        - start_date: 字符串 'YYYY-MM-DD'，从该日期开始（含）抓取
+        - end_date: 字符串 'YYYY-MM-DD'，默认到当前日期
+        
+        说明：
+        - 在已有历史数据基础上，仅补充 start_date 之后的新数据，避免重复抓取全部历史。
+        """
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+
+        print(f"\n开始增量抓取双色球数据：从 {start_date} 到 {end_date}")
+        
+        new_records = []
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+        page = 1
+
+        while True:
+            print(f"📄 增量抓取第 {page} 页数据...")
+
+            max_retries = 5
+            retry_count = 0
+            success = False
+
+            while retry_count < max_retries and not success:
+                try:
+                    # 每页或重试时更新headers
+                    if page == 1 or retry_count > 0:
+                        self._update_headers()
+
+                    params = {
+                        'name': 'ssq',
+                        'pageNo': page,
+                        'pageSize': 30,
+                        'systemType': 'PC',
+                        'dayStart': start_date,
+                        'dayEnd': end_date
+                    }
+
+                    print(f"🌐 发送增量请求到API... (页面 {page}, 尝试 {retry_count + 1})")
+                    response = self.session.get(self.api_url, params=params, timeout=30)
+
+                    print(f"📡 响应状态码: {response.status_code}")
+                    response.raise_for_status()
+
+                    data = response.json()
+                    print(f"📊 API响应解析: state={data.get('state')}")
+
+                    if data.get('state') != 0:
+                        print(f"❌ API返回错误: {data.get('message', '未知错误')}")
+                        retry_count += 1
+                        continue
+
+                    results = data.get('result', [])
+                    if not results:
+                        print(f"📭 增量抓取第 {page} 页无数据，结束。")
+                        success = True
+                        break
+
+                    print(f"✅ 第 {page} 页获取到 {len(results)} 条记录")
+                    consecutive_failures = 0
+
+                    for item in results:
+                        try:
+                            period = item.get('code', '')
+                            date_str = item.get('date', '')
+                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
+                            if not date_match:
+                                continue
+                            draw_date = date_match.group(1)
+
+                            # 只保留 >= start_date 的记录（防御性过滤）
+                            if draw_date < start_date:
+                                continue
+
+                            red_str = item.get('red', '')
+                            if not red_str:
+                                continue
+                            red_balls = [int(x.strip()) for x in red_str.split(',')]
+
+                            blue_str = item.get('blue', '')
+                            if not blue_str:
+                                continue
+                            blue_ball = int(blue_str)
+
+                            sales_amount = self._parse_number(item.get('sales', '0'))
+                            pool_amount = self._parse_number(item.get('poolmoney', '0'))
+
+                            prizegrades = item.get('prizegrades', [])
+                            first_prize_count = 0
+                            first_prize_amount = 0
+                            second_prize_count = 0
+                            second_prize_amount = 0
+
+                            for grade in prizegrades:
+                                if grade.get('type') == 1:
+                                    first_prize_count = self._parse_number(grade.get('typenum', '0'))
+                                    first_prize_amount = self._parse_number(grade.get('typemoney', '0'))
+                                elif grade.get('type') == 2:
+                                    second_prize_count = self._parse_number(grade.get('typenum', '0'))
+                                    second_prize_amount = self._parse_number(grade.get('typemoney', '0'))
+
+                            lottery_record = {
+                                'period': period,
+                                'date': draw_date,
+                                'red_balls': red_balls,
+                                'blue_ball': blue_ball,
+                                'first_prize_count': first_prize_count,
+                                'first_prize_amount': first_prize_amount,
+                                'second_prize_count': second_prize_count,
+                                'second_prize_amount': second_prize_amount,
+                                'sales_amount': sales_amount,
+                                'pool_amount': pool_amount
+                            }
+
+                            new_records.append(lottery_record)
+
+                        except Exception as e:
+                            print(f"⚠️  解析增量记录时出错: {e}")
+                            continue
+
+                    success = True
+
+                except requests.exceptions.Timeout:
+                    print(f"⏰ 增量抓取网络超时 (页面 {page}, 尝试 {retry_count + 1})")
+                    retry_count += 1
+                except requests.exceptions.ConnectionError:
+                    print(f"🔌 增量抓取连接错误 (页面 {page}, 尝试 {retry_count + 1})")
+                    retry_count += 1
+                except requests.exceptions.HTTPError as e:
+                    print(f"🌐 增量抓取HTTP错误: {e} (页面 {page}, 尝试 {retry_count + 1})")
+                    retry_count += 1
+                except Exception as e:
+                    print(f"❌ 增量抓取第 {page} 页时出错: {e} (尝试 {retry_count + 1})")
+                    retry_count += 1
+
+                if retry_count >= max_retries:
+                    consecutive_failures += 1
+                    print(f"💥 增量抓取第 {page} 页重试 {max_retries} 次后仍然失败，跳过此页")
+                    break
+
+            if not success or consecutive_failures >= max_consecutive_failures:
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"🛑 增量抓取连续 {max_consecutive_failures} 页失败，停止抓取以避免被封禁")
+                break
+
+            # 如果本页数据条数少于 pageSize，说明已经到末尾
+            if len(results) < 30:
+                break
+
+            page += 1
+
+        if not new_records:
+            print("📭 本次增量抓取没有发现新数据。")
+            return 0
+
+        # 将新纪录与现有数据合并，按期号排序去重（期号越大越新）
+        print(f"🎉 增量抓取完成，共获取 {len(new_records)} 期新数据，开始合并去重...")
+        # 现有数据 + 新数据 合并
+        all_records = {rec['period']: rec for rec in self.lottery_data}
+        for rec in new_records:
+            all_records[rec['period']] = rec
+
+        # 期号按字符串排序即可（格式为YYYYNNN），从新到旧
+        sorted_periods = sorted(all_records.keys(), reverse=True)
+        self.lottery_data = [all_records[p] for p in sorted_periods]
+
+        print(f"✅ 合并后总共有 {len(self.lottery_data)} 期数据")
+        return len(new_records)
+
+    def init_and_update_history(
+        self,
+        data_path: str = "data/lottery_data.json",
+        backup_path: str = "data/initial_backup/lottery_data_initial.json"
+    ):
+        """
+        初始化并增量更新历史数据，逻辑：
+        1. 优先从 data_path 读取主数据；
+        2. 若主数据不存在或为空，则尝试从 backup_path 读取初始备份数据；
+        3. 若仍失败，则从最早历史完整抓取一次，并同时写入主数据和初始备份；
+        4. 在已有历史数据基础上，根据最新日期做增量抓取，仅补充新期数。
+        
+        注：初始备份只在“首次完整抓取”时写一次，后续不再覆盖，节约资源。
+        """
+        print("\n=== 初始化并增量更新双色球历史数据 ===")
+
+        # 1. 尝试读取主数据
+        data_loaded = self.load_data(data_path)
+        if not data_loaded or not self.lottery_data:
+            print("主数据读取失败或为空，尝试从初始备份读取...")
+            # 2. 尝试读取初始备份
+            backup_loaded = self.load_data(backup_path)
+            if backup_loaded and self.lottery_data:
+                print(f"✅ 已从初始备份 {backup_path} 载入历史数据，将其保存为主数据。")
+                self.save_data(data_path)
+            else:
+                print("初始备份读取失败或为空，将从最早历史开始完整抓取一次...")
+                # 3. 完整抓取一次历史数据
+                max_pages = self.get_max_pages()
+                self.fetch_lottery_data(max_pages=max_pages)
+                if not self.lottery_data:
+                    print("❌ 完整抓取历史数据失败，无法继续。")
+                    return
+                # 保存主数据
+                self.save_data(data_path)
+                # 写入初始备份（只在首次完整抓取时写一次）
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                print(f"🔄 正在写入初始备份数据到 {backup_path}")
+                with open(backup_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.lottery_data, f, ensure_ascii=False, indent=2)
+                print("✅ 初始备份写入完成。")
+
+        if not self.lottery_data:
+            print("❌ 无可用历史数据，跳过增量更新。")
+            return
+
+        # 4. 基于已有历史做增量抓取
+        # 假设 self.lottery_data 已按期号从新到旧排序（现有抓取逻辑就是这样）
+        latest_record = self.lottery_data[0]
+        latest_date_str = latest_record.get('date')
+        print(f"当前历史数据最新一期: 期号 {latest_record.get('period')} 日期 {latest_date_str}")
+
+        try:
+            latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
+        except Exception:
+            print("⚠️ 最新日期字段格式异常，跳过增量抓取。")
+            return
+
+        next_day = latest_date + timedelta(days=1)
+        today = datetime.now()
+
+        if next_day.date() > today.date():
+            print("📭 历史数据已是最新，无需增量抓取。")
+            return
+
+        start_date = next_day.strftime('%Y-%m-%d')
+        end_date = today.strftime('%Y-%m-%d')
+
+        new_count = self.fetch_lottery_data_incremental(start_date=start_date, end_date=end_date)
+        if new_count > 0:
+            # 更新主数据
+            self.save_data(data_path)
+        else:
+            print("📭 没有新增期数，无需保存主数据。")
     
     def analyze_frequency(self):
         """分析号码出现频率"""
@@ -656,6 +906,10 @@ class DoubleColorBallAnalyzer:
             red_total_freq = sum(red_counter.get(red, 0) for red in selected_reds)
             blue_freq = blue_counter.get(selected_blue, 0)
             
+            # 计算和值和跨度所属区间（与规律分析保持一致）
+            sum_range = f"{(total_sum//10)*10}-{(total_sum//10)*10+9}"
+            span_range = f"{(span//5)*5}-{(span//5)*5+4}"
+
             recommendations.append({
                 'red_balls': selected_reds,
                 'blue_ball': selected_blue,
@@ -663,19 +917,502 @@ class DoubleColorBallAnalyzer:
                 'strategy': strategy['name'],
                 'odd_even': f"{odd_count}奇{even_count}偶",
                 'sum': total_sum,
+                'sum_range': sum_range,
                 'span': span,
+                'span_range': span_range,
                 'red_freq_sum': red_total_freq,
                 'blue_freq': blue_freq
             })
         
         print("\n基于智能策略的推荐号码：")
         for i, rec in enumerate(recommendations, 1):
-            red_str = " ".join([f"{x:2d}" for x in rec['red_balls']])
-            print(f"推荐 {i}: {red_str} + {rec['blue_ball']:2d}")
+            red_str = " ".join([f"{x:02d}" for x in rec['red_balls']])
+            print(f"推荐 {i}: {red_str} + {rec['blue_ball']:02d}")
             print(f"       策略: {rec['strategy']} | {rec['odd_even']} | 和值:{rec['sum']} | 跨度:{rec['span']}")
             print(f"       说明: {rec['description']}")
         
         return recommendations
+    
+    def _get_zone_index(self, num):
+        """根据红球号码获取所属分区索引（0-6，对应1-5,6-10,...,31-33）"""
+        if 1 <= num <= 5:
+            return 0
+        if 6 <= num <= 10:
+            return 1
+        if 11 <= num <= 15:
+            return 2
+        if 16 <= num <= 20:
+            return 3
+        if 21 <= num <= 25:
+            return 4
+        if 26 <= num <= 30:
+            return 5
+        return 6  # 31-33
+    
+    def _get_zone_pattern(self, red_balls):
+        """获取红球在7个分区上的分布模式，用于覆盖优化"""
+        zones = [0] * 7
+        for n in red_balls:
+            idx = self._get_zone_index(n)
+            zones[idx] += 1
+        # 生成类似 "1-0-2-1-1-0-1" 的字符串
+        return "-".join(str(x) for x in zones)
+    
+    def generate_coverage_optimized_recommendations(self, total_sets=20, candidate_multiplier=8):
+        """
+        生成覆盖优化后的推荐号码组合
+        
+        目标：在相同注数预算下，让号码组合在奇偶、和值、分区等维度上更加分散，
+        从而让中小奖（部分命中）的体验更稳定，而不是追求提高理论中奖概率。
+        """
+        print(f"\n=== 覆盖优化推荐：目标组合数 {total_sets} 组 ===")
+        
+        if not self.lottery_data:
+            print("无数据，无法生成覆盖优化推荐")
+            return []
+        
+        # 先基于历史数据做频率分析，构造候选空间
+        red_counter = Counter()
+        blue_counter = Counter()
+        for record in self.lottery_data:
+            for red in record['red_balls']:
+                red_counter[red] += 1
+            blue_counter[record['blue_ball']] += 1
+        
+        for i in range(1, 34):
+            red_counter.setdefault(i, 0)
+        for i in range(1, 17):
+            blue_counter.setdefault(i, 0)
+        
+        red_freq_sorted = sorted(red_counter.items(), key=lambda x: x[1], reverse=True)
+        blue_freq_sorted = sorted(blue_counter.items(), key=lambda x: x[1], reverse=True)
+        
+        total_reds = len(red_freq_sorted)
+        high_cutoff = max(6, total_reds // 3)
+        mid_cutoff = max(12, 2 * total_reds // 3)
+        
+        high_freq_reds = [num for num, _ in red_freq_sorted[:high_cutoff]]
+        mid_freq_reds = [num for num, _ in red_freq_sorted[high_cutoff:mid_cutoff]]
+        low_freq_reds = [num for num, _ in red_freq_sorted[mid_cutoff:]]
+        high_freq_blues = [num for num, _ in blue_freq_sorted[:8]] or list(range(1, 17))
+        
+        print(f"覆盖优化使用的高频红球池: {sorted(high_freq_reds)}")
+        print(f"覆盖优化使用的中频红球池: {sorted(mid_freq_reds)}")
+        print(f"覆盖优化使用的低频红球池: {sorted(low_freq_reds)}")
+        
+        # 简单策略：偏高频 + 中频 + 少量低频，兼顾冷热
+        base_strategy = {'high': 3, 'mid': 2, 'low': 1}
+        
+        # 生成候选组合池（数量为目标组合数的 candidate_multiplier 倍）
+        target_candidates = max(total_sets * candidate_multiplier, total_sets * 3)
+        random.seed(12345)  # 与普通推荐分开，保证可复现
+        
+        candidates = []
+        seen_combos = set()
+        
+        def build_one_combo():
+            reds = []
+            pools = [
+                (high_freq_reds, base_strategy['high']),
+                (mid_freq_reds, base_strategy['mid']),
+                (low_freq_reds, base_strategy['low']),
+            ]
+            for pool, cnt in pools:
+                if cnt > 0 and pool:
+                    k = min(cnt, len(pool))
+                    reds.extend(random.sample(pool, k))
+            # 补齐到6个红球
+            while len(reds) < 6:
+                all_available = set(range(1, 34)) - set(reds)
+                if not all_available:
+                    break
+                reds.append(random.choice(list(all_available)))
+            reds = tuple(sorted(reds[:6]))
+            
+            # 蓝球：优先从高频中选，其次全局随机
+            if high_freq_blues:
+                if random.random() < 0.7:
+                    blue = random.choice(high_freq_blues)
+                else:
+                    blue = random.randint(1, 16)
+            else:
+                blue = random.randint(1, 16)
+            return reds, blue
+        
+        while len(candidates) < target_candidates:
+            reds, blue = build_one_combo()
+            key = (reds, blue)
+            if key in seen_combos:
+                continue
+            seen_combos.add(key)
+            
+            odd_count = sum(1 for x in reds if x % 2 == 1)
+            even_count = 6 - odd_count
+            total_sum = sum(reds)
+            sum_range = f"{(total_sum//10)*10}-{(total_sum//10)*10+9}"
+            span = max(reds) - min(reds)
+            zone_pattern = self._get_zone_pattern(reds)
+            red_total_freq = sum(red_counter.get(r, 0) for r in reds)
+            blue_freq = blue_counter.get(blue, 0)
+            
+            candidates.append({
+                'red_balls': list(reds),
+                'blue_ball': blue,
+                'odd_even': f"{odd_count}奇{even_count}偶",
+                'sum': total_sum,
+                'sum_range': sum_range,
+                'span': span,
+                'zone_pattern': zone_pattern,
+                'red_freq_sum': red_total_freq,
+                'blue_freq': blue_freq,
+            })
+        
+        print(f"已生成候选组合 {len(candidates)} 组，开始执行覆盖优化选择...")
+        
+        # 覆盖优化：贪心选择，控制组合相似度，并平衡奇偶/和值/分区分布
+        selected = []
+        odd_even_usage = Counter()
+        sum_range_usage = Counter()
+        zone_pattern_usage = Counter()
+        
+        def overlap_penalty(candidate):
+            """与已选组合的最大红球重合数，越小越好"""
+            if not selected:
+                return 0
+            reds = set(candidate['red_balls'])
+            return max(len(reds & set(s['red_balls'])) for s in selected)
+        
+        while len(selected) < total_sets and candidates:
+            # 计算每个候选的评分
+            best_idx = None
+            best_key = None
+            
+            for idx, c in enumerate(candidates):
+                ov = overlap_penalty(c)
+                # 强约束：不接受与已有组合红球重合 >=5 的候选，避免组合高度类似
+                if ov >= 5:
+                    continue
+                
+                usage_score = (
+                    odd_even_usage[c['odd_even']] +
+                    sum_range_usage[c['sum_range']] +
+                    zone_pattern_usage[c['zone_pattern']]
+                )
+                # 频率得分：偏向整体历史频率略高的组合，但权重很小
+                freq_score = c['red_freq_sum'] + c['blue_freq']
+                # 排序键：先最小重合，其次最小使用度，最后最大频率
+                key = (ov, usage_score, -freq_score)
+                
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_idx = idx
+            
+            if best_idx is None:
+                # 剩余候选都过于相似，直接退出
+                break
+            
+            chosen = candidates.pop(best_idx)
+            selected.append(chosen)
+            odd_even_usage[chosen['odd_even']] += 1
+            sum_range_usage[chosen['sum_range']] += 1
+            zone_pattern_usage[chosen['zone_pattern']] += 1
+        
+        print(f"覆盖优化完成，最终选择 {len(selected)} 组组合。")
+        print("覆盖优化推荐号码：")
+        for i, rec in enumerate(selected, 1):
+            red_str = " ".join([f"{x:2d}" for x in rec['red_balls']])
+            print(f"推荐 {i}: {red_str} + {rec['blue_ball']:2d}")
+            print(f"       特征: {rec['odd_even']} | 和值:{rec['sum']} | 跨度:{rec['span']} | 分区:{rec['zone_pattern']}")
+        
+        # 为了与原有结构兼容，补充描述字段
+        for rec in selected:
+            rec.setdefault('description', '覆盖优化组合（分散奇偶、和值和分区分布）')
+            rec.setdefault('strategy', '覆盖优化')
+        
+        return selected
+
+    def generate_betting_plan_for_7_tickets(self):
+        """
+        生成一套符合以下结构的投注方案：
+        - 5 注：标准 6+1 单式票
+        - 1 注：7+1 复式票
+        - 1 注：6+2 复式票
+        
+        目标依旧是：在固定预算下，尽量分散号码，提升中小奖体验的稳定性。
+        """
+        print("\n=== 生成 7 注结构化投注方案 ===")
+        if not self.lottery_data:
+            print("无数据，无法生成投注方案")
+            return {}
+
+        # 先用覆盖优化生成基础候选组合（至少 7 组）
+        coverage_recs = self.generate_coverage_optimized_recommendations(total_sets=7)
+        if len(coverage_recs) < 3:
+            print("覆盖优化组合数量不足，无法构造完整方案")
+            return {}
+
+        # 统计历史频率（用于挑选蓝球等）
+        red_counter = Counter()
+        blue_counter = Counter()
+        for record in self.lottery_data:
+            for r in record['red_balls']:
+                red_counter[r] += 1
+            blue_counter[record['blue_ball']] += 1
+
+        # ---------- 1. 5 注 6+1 单式 ----------
+        single_tickets = []
+        for rec in coverage_recs[:5]:
+            single_tickets.append({
+                "red_balls": sorted(rec["red_balls"]),
+                "blue_balls": [rec["blue_ball"]],
+                "type": "6+1",
+                "source_strategy": rec.get("strategy", "覆盖优化")
+            })
+
+        # ---------- 2. 1 注 7+1 复式 ----------
+        # 思路：在已选组合的基础上，尽量扩展到 7 个不重复红球，蓝球选高频蓝之一
+        all_reds = set()
+        for rec in coverage_recs:
+            all_reds.update(rec["red_balls"])
+        all_reds = sorted(all_reds)
+
+        if len(all_reds) >= 7:
+            reds_7 = all_reds[:7]
+        else:
+            # 不足 7 个则从全局补齐
+            reds_7 = list(all_reds)
+            for n in range(1, 34):
+                if n not in reds_7:
+                    reds_7.append(n)
+                if len(reds_7) >= 7:
+                    break
+
+        # 选择一个较高频的蓝球作为 7+1 的蓝球
+        if blue_counter:
+            most_common_blues = sorted(blue_counter.items(), key=lambda x: x[1], reverse=True)
+            blue_for_7_1 = most_common_blues[0][0]
+        else:
+            # 退化情况，直接取覆盖推荐的第一个蓝球
+            blue_for_7_1 = coverage_recs[0]["blue_ball"]
+
+        ticket_7_1 = {
+            "red_balls": sorted(reds_7),
+            "blue_balls": [blue_for_7_1],
+            "type": "7+1",
+            "description": "基于覆盖优化结果扩展到 7 个红球，作为复式覆盖"
+        }
+
+        # ---------- 3. 1 注 6+2 复式 ----------
+        # 思路：选一组代表性红球 + 2 个尽量不同的高频蓝球
+        base_reds_for_6_2 = sorted(coverage_recs[5]["red_balls"])
+
+        # 获取按频率排序的蓝球列表
+        if blue_counter:
+            sorted_blues = [b for b, _ in sorted(blue_counter.items(), key=lambda x: x[1], reverse=True)]
+        else:
+            sorted_blues = list(range(1, 17))
+
+        blue_for_6_2 = []
+        for b in sorted_blues:
+            if b not in blue_for_6_2:
+                blue_for_6_2.append(b)
+            if len(blue_for_6_2) >= 2:
+                break
+
+        ticket_6_2 = {
+            "red_balls": base_reds_for_6_2,
+            "blue_balls": blue_for_6_2,
+            "type": "6+2",
+            "description": "使用覆盖优化红球 + 2 个高频蓝球构建复式"
+        }
+
+        betting_plan = {
+            "singles_6_1": single_tickets,
+            "combo_7_1": ticket_7_1,
+            "combo_6_2": ticket_6_2
+        }
+
+        # 打印方案概览
+        print("\n--- 5 注 6+1 单式 ---")
+        for i, t in enumerate(single_tickets, 1):
+            red_str = " ".join(f"{x:02d}" for x in t["red_balls"])
+            blue_str = " ".join(f"{x:02d}" for x in t["blue_balls"])
+            print(f"单式 {i}: {red_str} + {blue_str}  (策略: {t['source_strategy']})")
+
+        print("\n--- 1 注 7+1 复式 ---")
+        red_str = " ".join(f"{x:02d}" for x in ticket_7_1["red_balls"])
+        blue_str = " ".join(f"{x:02d}" for x in ticket_7_1["blue_balls"])
+        print(f"7+1: {red_str} + {blue_str}")
+
+        print("\n--- 1 注 6+2 复式 ---")
+        red_str = " ".join(f"{x:02d}" for x in ticket_6_2["red_balls"])
+        blue_str = " ".join(f"{x:02d}" for x in ticket_6_2["blue_balls"])
+        print(f"6+2: {red_str} + {blue_str}")
+
+        print("\n✅ 7 注投注方案生成完成（目标：在固定预算下分散风险、平滑中小奖体验）。")
+
+        return betting_plan
+
+    def generate_enhanced_plan_with_combos(self):
+        """
+        基于8种智能策略推荐 + 历史规律分析，生成：
+        - 8 注 6+1 单式（原有8种策略）
+        - 1 注 7+1 复式
+        - 1 注 6+2 复式
+        
+        其中 7+1、6+2 复式基于“历史上出现情况最多”的策略特征构建。
+        """
+        print("\n=== 生成增强版推荐方案：8种策略 + 2种复式 ===")
+        if not self.lottery_data:
+            print("无数据，无法生成推荐方案")
+            return {}
+
+        # 历史规律原始分布（奇偶 / 和值区间 / 跨度区间）
+        patterns_raw = self._get_patterns_analysis_raw()
+        odd_even_dist = patterns_raw.get('odd_even_dist', {})
+        sum_dist = patterns_raw.get('sum_dist', {})
+        span_dist = patterns_raw.get('span_dist', {})
+
+        # 先生成8种策略推荐（6+1 单式）
+        recommendations = self.generate_recommendations(num_sets=8)
+        if not recommendations:
+            print("8种策略推荐生成失败，无法构建增强方案。")
+            return {}
+
+        # 分析每种策略在历史中的“支持度”：使用出现次数最多的奇偶/和值/跨度模式
+        best_rec = None
+        best_score = None
+        for rec in recommendations:
+            oe = rec.get('odd_even')
+            sr = rec.get('sum_range')
+            sp = rec.get('span_range')
+            score = (
+                odd_even_dist.get(oe, 0) +
+                sum_dist.get(sr, 0) +
+                span_dist.get(sp, 0)
+            )
+            rec['history_score'] = score
+            if best_score is None or score > best_score:
+                best_score = score
+                best_rec = rec
+
+        print("\n历史匹配度评分（越高表示该策略特征在历史中越常见）：")
+        for idx, rec in enumerate(recommendations, 1):
+            print(f"策略 {idx} [{rec['strategy']}]: 历史匹配得分 = {rec.get('history_score', 0)}")
+
+        if not best_rec:
+            print("未能根据历史数据识别出最优策略特征，跳过复式构建。")
+            best_rec = recommendations[0]
+
+        print(f"\n📌 历史模式最匹配的策略: {best_rec['strategy']} (得分 {best_rec.get('history_score', 0)})")
+
+        # ---------- 8 注 6+1 单式（直接使用8种策略结果） ----------
+        singles_6_1 = []
+        for rec in recommendations:
+            singles_6_1.append({
+                "red_balls": sorted(rec["red_balls"]),
+                "blue_balls": [rec["blue_ball"]],
+                "type": "6+1",
+                "strategy": rec["strategy"],
+                "description": rec["description"],
+                "odd_even": rec["odd_even"],
+                "sum": rec["sum"],
+                "span": rec["span"]
+            })
+
+        # ---------- 构建复式使用的基础信息 ----------
+        # 历史频率统计，用于选额外红球/蓝球
+        red_counter = Counter()
+        blue_counter = Counter()
+        for record in self.lottery_data:
+            for r in record['red_balls']:
+                red_counter[r] += 1
+            blue_counter[record['blue_ball']] += 1
+
+        # 以历史最匹配策略的红球为基础
+        base_reds = sorted(best_rec["red_balls"])
+        base_blue = best_rec["blue_ball"]
+
+        # ---------- 7+1 复式：在基础6个红球上扩展1个红球 ----------
+        # 选择历史高频、且不在基础组合中的一个红球作为扩展
+        extra_red = None
+        if red_counter:
+            sorted_reds_by_freq = [n for n, _ in sorted(red_counter.items(), key=lambda x: x[1], reverse=True)]
+            for n in sorted_reds_by_freq:
+                if n not in base_reds:
+                    extra_red = n
+                    break
+        if extra_red is None:
+            # 退化情况：从1-33中随便补一个没出现的
+            for n in range(1, 34):
+                if n not in base_reds:
+                    extra_red = n
+                    break
+        if extra_red is None:
+            # 所有号都在基础组合里（理论上不会发生），就重复使用基础中的一个
+            extra_red = base_reds[0]
+
+        reds_7_1 = sorted(base_reds + [extra_red])
+        ticket_7_1 = {
+            "red_balls": reds_7_1,
+            "blue_balls": [base_blue],
+            "type": "7+1",
+            "source_strategy": best_rec["strategy"],
+            "description": "基于历史高匹配策略扩展1个高频红球构建7+1复式"
+        }
+
+        # ---------- 6+2 复式：基础红球 + 1个额外蓝球 ----------
+        # 选择一个与基础蓝球不同的高频蓝球
+        extra_blue = None
+        if blue_counter:
+            sorted_blues_by_freq = [b for b, _ in sorted(blue_counter.items(), key=lambda x: x[1], reverse=True)]
+            for b in sorted_blues_by_freq:
+                if b != base_blue:
+                    extra_blue = b
+                    break
+        if extra_blue is None:
+            # 退化情况：从1-16中选一个不同的
+            for b in range(1, 17):
+                if b != base_blue:
+                    extra_blue = b
+                    break
+        if extra_blue is None:
+            extra_blue = base_blue
+
+        ticket_6_2 = {
+            "red_balls": base_reds,
+            "blue_balls": sorted([base_blue, extra_blue]),
+            "type": "6+2",
+            "source_strategy": best_rec["strategy"],
+            "description": "基于历史高匹配策略蓝球扩展构建6+2复式"
+        }
+
+        enhanced_plan = {
+            "singles_6_1": singles_6_1,
+            "combo_7_1": ticket_7_1,
+            "combo_6_2": ticket_6_2
+        }
+
+        # 控制台输出总览（两位数格式）
+        print("\n--- 8 注 6+1 单式（智能策略） ---")
+        for i, t in enumerate(singles_6_1, 1):
+            red_str = " ".join(f"{x:02d}" for x in t["red_balls"])
+            blue_str = " ".join(f"{x:02d}" for x in t["blue_balls"])
+            print(f"单式 {i}: {red_str} + {blue_str}  (策略: {t['strategy']})")
+
+        print("\n--- 1 注 7+1 复式（基于历史高匹配策略） ---")
+        red_str = " ".join(f"{x:02d}" for x in ticket_7_1["red_balls"])
+        blue_str = " ".join(f"{x:02d}" for x in ticket_7_1["blue_balls"])
+        print(f"7+1: {red_str} + {blue_str}  (来源策略: {ticket_7_1['source_strategy']})")
+
+        print("\n--- 1 注 6+2 复式（基于历史高匹配策略） ---")
+        red_str = " ".join(f"{x:02d}" for x in ticket_6_2["red_balls"])
+        blue_str = " ".join(f"{x:02d}" for x in ticket_6_2["blue_balls"])
+        print(f"6+2: {red_str} + {blue_str}  (来源策略: {ticket_6_2['source_strategy']})")
+
+        print("\n✅ 增强版推荐方案生成完成：8种策略单式 + 7+1 + 6+2。")
+
+        return enhanced_plan
     
     def _select_with_odd_even_balance(self, pool, count, existing_reds):
         """在选择时考虑奇偶平衡"""
@@ -1429,7 +2166,7 @@ def main():
     print("🎯 双色球数据分析系统")
     print("=" * 80)
     print("⚠️  重要免责声明：")
-    print("• 彩票开奖完全随机，历史数据无法预测未来")
+    print("• 彩票开奖完全随机")
     print("• 本分析仅供学习参考，不构成投注建议")
     print("• 请理性购彩，量力而行，未满18周岁禁止购买")
     print("• 使用本软件产生的任何后果由用户自行承担")

@@ -5,7 +5,7 @@
 
 ⚠️  重要免责声明 ⚠️
 1. 本脚本仅用于技术学习和数据分析研究目的
-2. 彩票开奖结果完全随机，历史数据无法预测未来结果
+2. 彩票开奖结果完全随机
 3. 本分析结果仅供参考，不构成任何投注建议
 4. 请理性购彩，量力而行，未满18周岁禁止购买彩票
 5. 开发者不承担因使用本脚本产生的任何损失
@@ -47,7 +47,7 @@ def show_disclaimer():
     print("🎯 彩票数据分析统一系统")
     print("=" * 80)
     print("⚠️  重要免责声明：")
-    print("• 彩票开奖完全随机，历史数据无法预测未来")
+    print("• 彩票开奖完全随机")
     print("• 本分析仅供学习参考，不构成投注建议")
     print("• 请理性购彩，量力而行，未满18周岁禁止购买")
     print("• 使用本软件产生的任何后果由用户自行承担")
@@ -61,11 +61,9 @@ def run_lottery_analyzer(unified_timestamp=None):
     
     try:
         analyzer = DoubleColorBallAnalyzer()
-        
-        # 获取最大页数并抓取数据
-        max_pages = analyzer.get_max_pages()
-        analyzer.fetch_lottery_data(max_pages=max_pages)
-        analyzer.save_data()
+
+        # 初始化并增量更新历史数据（优先复用已有数据，必要时完整抓取一次）
+        analyzer.init_and_update_history()
         
         if not analyzer.lottery_data:
             print("❌ 双色球数据获取失败")
@@ -76,7 +74,11 @@ def run_lottery_analyzer(unified_timestamp=None):
         analyzer.analyze_patterns()
         analyzer.analyze_trends()
         analyzer.generate_recommendations(num_sets=8)
-        
+        # 生成增强版推荐方案：8种策略 + 7+1 和 6+2 复式
+        analyzer.generate_enhanced_plan_with_combos()
+        #plan = analyzer.generate_betting_plan_for_7_tickets()
+        #print(plan)
+
         # 生成图表和报告
         try:
             analyzer.visualize_frequency()
